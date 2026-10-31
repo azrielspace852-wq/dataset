@@ -1,7 +1,6 @@
 name: Upload to Release
 
 on:
-  # Hanya manual — TIDAK jalan otomatis saat push/commit
   workflow_dispatch:
     inputs:
       config:
@@ -11,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   upload:
@@ -31,14 +31,72 @@ jobs:
             exit 1
           fi
 
-          # Fungsi rekursif: cari zip terdalam (yang tidak punya zip di dalamnya)
+          # ---------- Downloader (artifact-aware) ----------
+          download_file() {
+            local url="$1"
+            local dest="$2"
+
+            # Deteksi URL UI artifact:
+            # https://github.com/OWNER/REPO/actions/runs/RUN/artifacts/ART_ID
+            if [[ "$url" =~ ^https?://github\.com/([^/]+)/([^/]+)/actions/runs/([0-9]+)/artifacts/([0-9]+) ]]; then
+              local owner="${BASH_REMATCH[1]}"
+              local repo="${BASH_REMATCH[2]}"
+              local art_id="${BASH_REMATCH[4]}"
+              echo "🔍 GitHub Actions artifact terdeteksi: repo=$owner/$repo, artifact_id=$art_id"
+
+              # --- Metode 1: gh api langsung (gh menangani redirect) ---
+              if gh api -H "Accept: application/vnd.github+json" \
+                        "/repos/$owner/$repo/actions/artifacts/$art_id/zip" > "$dest" 2>/dev/null; then
+                if [ -s "$dest" ] && unzip -l "$dest" >/dev/null 2>&1; then
+                  echo "✅ Artifact diunduh via gh api"
+                  return 0
+                fi
+              fi
+
+              echo "⚠️ gh api gagal / hasil bukan zip, coba metode metadata+curl..."
+
+              # --- Metode 2: metadata → ambil redirect S3 tanpa kirim Authorization ke S3 ---
+              local meta archive_url redirect_url
+              meta="$(gh api "/repos/$owner/$repo/actions/artifacts/$art_id" 2>/dev/null || true)"
+              archive_url="$(echo "$meta" | jq -r '.archive_download_url // empty')"
+
+              if [ -z "$archive_url" ]; then
+                echo "::error::Tidak dapat archive_download_url untuk artifact $art_id."
+                echo "::error::Pastikan PAT (GH_PAT) punya akses ke $owner/$repo dan scope yang sesuai (repo / actions:read)."
+                return 1
+              fi
+
+              redirect_url="$(curl -sS --no-location -o /dev/null -D - \
+                                -H "Authorization: token $GH_TOKEN" \
+                                -H "Accept: application/vnd.github+json" \
+                                "$archive_url" 2>/dev/null \
+                              | awk 'BEGIN{IGNORECASE=1} /^location:/{sub(/^location:[ \t]*/,""); sub(/\r$/,""); print; exit}')"
+
+              if [ -z "$redirect_url" ]; then
+                echo "::error::Tidak dapat redirect URL dari archive_download_url (artifact mungkin sudah kedaluwarsa/dihapus)."
+                return 1
+              fi
+
+              curl -fsSL "$redirect_url" -o "$dest"
+              return 0
+            fi
+
+            # --- URL biasa ---
+            if ! ( wget -q --timeout=180 -O "$dest" "$url" \
+                   || curl -fsSL --max-time 300 -o "$dest" "$url" ); then
+              echo "::error::Download gagal: $url"
+              return 1
+            fi
+          }
+
+          # ---------- Cari zip terdalam (rekursif) ----------
           process_zip() {
             local file="$1"
             local work="$2"
             mkdir -p "$work/extracted"
 
             if ! unzip -o -q "$file" -d "$work/extracted" 2>/dev/null; then
-              echo "::warning::Gagal extract $file — pakai file ini apa adanya"
+              echo "::warning::Gagal extract $(basename "$file") — pakai apa adanya"
               echo "$file"
               return
             fi
@@ -49,10 +107,8 @@ jobs:
             done < <(find "$work/extracted" -type f -iname "*.zip" -print0)
 
             if [ ${#inner[@]} -eq 0 ]; then
-              # Tidak ada zip lagi → ini zip terdalam → upload ini
               echo "$file"
             else
-              # Masih ada zip → gali lebih dalam
               local c=0
               for iz in "${inner[@]}"; do
                 c=$((c+1))
@@ -61,8 +117,8 @@ jobs:
             fi
           }
 
+          # ---------- Loop utama ----------
           for item in "${ITEMS[@]}"; do
-            # Trim spasi
             item="$(echo "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [ -z "$item" ] && continue
 
@@ -80,15 +136,10 @@ jobs:
             dl="$work/download"
 
             echo "⬇️ Download..."
-            if ! ( wget -q --timeout=180 -O "$dl" "$link" \
-                   || curl -fsSL --max-time 300 -o "$dl" "$link" ); then
-              echo "::error::Download gagal: $link"
-              exit 1
-            fi
+            download_file "$link" "$dl" || exit 1
 
             to_upload=()
             if unzip -l "$dl" >/dev/null 2>&1; then
-              # File adalah zip → telusuri sampai ketemu zip terdalam
               mv "$dl" "$work/input.zip"
               mapfile -t inner_files < <(process_zip "$work/input.zip" "$work/ex")
               for f in "${inner_files[@]}"; do
@@ -104,13 +155,11 @@ jobs:
               exit 1
             fi
 
-            # Buat release kalau belum ada
             if ! gh release view "$tag" -R "$REPO" >/dev/null 2>&1; then
               echo "📦 Release '$tag' belum ada — dibuat."
               gh release create "$tag" -R "$REPO" --title "$tag" --notes "Release $tag"
             fi
 
-            # Upload tiap file (biasanya 1, tapi kalau ada multiple zip terdalam tetap aman)
             idx=0
             total=${#to_upload[@]}
             for f in "${to_upload[@]}"; do
