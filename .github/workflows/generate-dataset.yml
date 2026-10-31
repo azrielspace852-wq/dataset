@@ -32,21 +32,50 @@ jobs:
             "fsspec==2023.9.2" \
             "pyarrow>=14.0,<15"
 
-      - name: Run dataset generator
-        continue-on-error: true          # <- penting: jangan gagalkan job karena crash exit
+      # Jalankan tiap bahasa di proses Python terpisah.
+      # Kalau satu crash, bahasa lain tetap selesai.
+      - name: Run dataset generator (per language)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python scripts/generate_dataset.py
-
-      - name: Verify output exists
         run: |
-          test -f output/id.jsonl
-          test -f output/en.jsonl
-          test -f output/zh.jsonl
-          test -f output/fr.jsonl
-          test -f output/ko.jsonl
-          echo "All output files exist."
+          set +e
+          status=0
+          for lang in id en zh fr ko; do
+            echo "==================== [$lang] starting ===================="
+            python scripts/generate_dataset.py --lang "$lang"
+            ec=$?
+            if [ $ec -ne 0 ]; then
+              echo "[WARN] $lang exited with code $ec (output likely already written)"
+              status=1
+            else
+              echo "[OK] $lang finished"
+            fi
+          done
+          # Jangan gagalkan job: langkah verifikasi di bawah akan menentukan
+          exit 0
+
+      - name: Verify output files
+        run: |
+          set -e
+          missing=0
+          for f in id en zh fr ko; do
+            path="output/$f.jsonl"
+            if [ ! -s "$path" ]; then
+              echo "ERROR: $path missing or empty"
+              missing=1
+            else
+              lines=$(wc -l < "$path")
+              size=$(du -h "$path" | cut -f1)
+              echo "OK: $path  ($lines lines, $size)"
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "---- output dir content ----"
+            ls -la output || true
+            exit 1
+          fi
+          echo "All output files present and non-empty."
 
       - name: Zip output
         run: |
@@ -60,4 +89,4 @@ jobs:
           name: multilingual-dataset-150m
           path: dataset-150m.zip
           retention-days: 30
-          compression-level: 9 
+          compression-level: 9
