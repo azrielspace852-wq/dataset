@@ -1,0 +1,77 @@
+name: Create Release & Upload Asset
+
+on:
+  # Cuma manual dari tab Actions, tidak auto-run saat push/commit
+  workflow_dispatch:
+    inputs:
+      releases:
+        description: |
+          Satu baris = 1 tag + 1 link. Format: tag|url
+          Contoh:
+          v1.0.0|https://example.com/file.zip
+          v1.0.1|https://example.com/file2.zip
+        required: true
+        type: string
+      draft:
+        description: "Buat sebagai draft release? (opsional)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # wajib untuk bikin release & upload asset
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Proses download & upload ke release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_RELEASES: ${{ inputs.releases }}
+          DRAFT: ${{ inputs.draft }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloads
+
+          trim() { echo "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+
+          # Baca tiap baris input
+          echo "$INPUT_RELEASES" | while IFS= read -r line; do
+            line="$(trim "$line")"
+            [ -z "$line" ] && continue
+
+            tag="$(trim "$(echo "$line" | cut -d'|' -f1)")"
+            url="$(trim "$(echo "$line" | cut -d'|' -f2)")"
+
+            if [ -z "$tag" ] || [ -z "$url" ]; then
+              echo "::warning::Baris tidak valid, dilewati: $line"
+              continue
+            fi
+
+            # Ambil nama file dari URL (buang query string)
+            base="${url%%\?*}"
+            filename="${base##*/}"
+            [ -z "$filename" ] && filename="asset-$(date +%s)"
+
+            echo "::group::⬇️  Download [$tag] → $filename"
+            echo "URL   : $url"
+            echo "Target: downloads/$filename"
+            curl -fL --retry 3 --retry-delay 3 -o "downloads/$filename" "$url"
+            echo "::endgroup::"
+
+            if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+              echo "::notice::Release '$tag' sudah ada → upload asset (overwrite jika sama)"
+              gh release upload "$tag" "downloads/$filename" --repo "$REPO" --clobber
+            else
+              echo "::notice::Membuat release baru '$tag'"
+              args=(--title "$tag" --notes "Asset: $filename")
+              if [ "$DRAFT" = "true" ]; then
+                args+=(--draft)
+              fi
+              gh release create "$tag" "downloads/$filename" --repo "$REPO" "${args[@]}"
+            fi
+          done
+
+          echo "✅ Selesai. Cek: https://github.com/$REPO/releases"
