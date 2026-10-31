@@ -5,12 +5,9 @@ Target: ~150M tokens across 5 languages.
 """
 
 import json
-import os
-import sys
 from pathlib import Path
 from datasets import load_dataset
 
-# ---------- Konfigurasi ----------
 LANGUAGES = {
     "ind": "Indonesian",
     "eng": "English",
@@ -19,25 +16,20 @@ LANGUAGES = {
     "kor": "Korean",
 }
 
-# Target token per bahasa (dibagi rata)
-TOKENS_PER_LANG = 30_000_000  # 30M × 5 = 150M
-
-# Dataset
-DATASET_NAME = "uonlp/CulturaX"
-OUTPUT_DIR = Path("output")
+TOKENS_PER_LANG = 30_000_000          # 30M × 5 = 150M
+DATASET_NAME    = "uonlp/CulturaX"
+OUTPUT_DIR      = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# ---------- Fungsi bantu ----------
+
 def count_tokens(text: str) -> int:
-    """Perkiraan kasar jumlah token (whitespace split)."""
     return len(text.split())
 
-def stream_language(lang_code: str, target_tokens: int):
-    """
-    Stream dataset CulturaX untuk satu bahasa,
-    kumpulkan teks hingga target token tercapai.
-    """
-    print(f"[INFO] Streaming {lang_code} … target {target_tokens:,} tokens")
+
+def stream_language_to_file(lang_code: str, target_tokens: int, out_path: Path) -> int:
+    """Stream dataset CulturaX untuk 1 bahasa, tulis JSONL langsung ke disk."""
+    print(f"[INFO] Streaming {lang_code} -> {out_path} (target {target_tokens:,} tokens)", flush=True)
+
     ds = load_dataset(
         DATASET_NAME,
         lang_code,
@@ -47,45 +39,43 @@ def stream_language(lang_code: str, target_tokens: int):
     )
 
     total_tokens = 0
-    buffer = []
+    next_report  = 1_000_000
 
-    for example in ds:
-        text = example.get("text", "")
-        if not text or not text.strip():
-            continue
+    with open(out_path, "w", encoding="utf-8") as f:
+        for example in ds:
+            text = example.get("text", "")
+            if not text or not text.strip():
+                continue
 
-        buffer.append(text)
-        total_tokens += count_tokens(text)
+            f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+            total_tokens += count_tokens(text)
 
-        if total_tokens >= target_tokens:
-            print(f"[INFO] {lang_code}: reached ~{total_tokens:,} tokens")
-            break
+            if total_tokens >= next_report:
+                print(f"[INFO] {lang_code}: {total_tokens:,} tokens", flush=True)
+                next_report += 1_000_000
 
-    return buffer, total_tokens
+            if total_tokens >= target_tokens:
+                print(f"[INFO] {lang_code}: reached ~{total_tokens:,} tokens", flush=True)
+                break
 
-# ---------- Main ----------
-def main():
-    all_data = {}
+    return total_tokens
+
+
+def main() -> None:
+    summary = {}
 
     for lang_code, lang_name in LANGUAGES.items():
-        texts, tok_count = stream_language(lang_code, TOKENS_PER_LANG)
-        all_data[lang_code] = {
-            "language": lang_name,
-            "tokens": tok_count,
-            "texts": texts,
-        }
-
-    # Tulis JSONL per bahasa
-    for lang_code, payload in all_data.items():
         out_path = OUTPUT_DIR / f"{lang_code}.jsonl"
-        with open(out_path, "w", encoding="utf-8") as f:
-            for text in payload["texts"]:
-                f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
-        print(f"[OK] {out_path}  ({payload['tokens']:,} tokens)")
+        tok = stream_language_to_file(lang_code, TOKENS_PER_LANG, out_path)
+        summary[lang_code] = {"language": lang_name, "tokens": tok, "file": str(out_path)}
+        print(f"[OK] {out_path}  ({tok:,} tokens)", flush=True)
 
-    # Ringkasan
-    total = sum(v["tokens"] for v in all_data.values())
-    print(f"[DONE] Total estimated tokens: {total:,}")
+    with open(OUTPUT_DIR / "summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    total = sum(v["tokens"] for v in summary.values())
+    print(f"[DONE] Total estimated tokens: {total:,}", flush=True)
+
 
 if __name__ == "__main__":
     main()
