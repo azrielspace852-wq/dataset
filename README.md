@@ -20,7 +20,8 @@ You can visit at huggingface: https://huggingface.co/datasets/uonlp/CulturaX
 ├── .github/
 │   └── workflows/
 │       └── generate-dataset.yml
-└── generate_dataset.py
+└── scripts/
+    └── generate_dataset.py
 ```
 
 ## Total tokens
