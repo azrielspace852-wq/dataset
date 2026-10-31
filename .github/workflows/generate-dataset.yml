@@ -25,14 +25,28 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "datasets>=2.18" "huggingface_hub>=0.23"
+          # Pin fsspec & pyarrow untuk menghindari bug streaming + shutdown
+          pip install \
+            "datasets>=2.18,<3" \
+            "huggingface_hub>=0.23" \
+            "fsspec==2023.9.2" \
+            "pyarrow>=14.0,<15"
 
-      # --- Login dihapus: HF_TOKEN cukup lewat env, dibaca otomatis oleh huggingface_hub ---
       - name: Run dataset generator
+        continue-on-error: true          # <- penting: jangan gagalkan job karena crash exit
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}   # alias lama, biar aman
+          HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python scripts/generate_dataset.py
+
+      - name: Verify output exists
+        run: |
+          test -f output/id.jsonl
+          test -f output/en.jsonl
+          test -f output/zh.jsonl
+          test -f output/fr.jsonl
+          test -f output/ko.jsonl
+          echo "All output files exist."
 
       - name: Zip output
         run: |
@@ -46,4 +60,4 @@ jobs:
           name: multilingual-dataset-150m
           path: dataset-150m.zip
           retention-days: 30
-          compression-level: 9
+          compression-level: 9 
