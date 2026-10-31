@@ -16,9 +16,38 @@ import sys
 import traceback
 from pathlib import Path
 
-from datasets import load_dataset
+# ---- Unbuffered stdout/stderr supaya log muncul realtime di GitHub Actions ----
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
-# CulturaX uses ISO 639-1 (2-letter) language codes.
+print("[BOOT] generate_dataset.py: mulai", flush=True)
+
+# ---- Import (dipisah supaya error import kelihatan jelas) ----
+try:
+    from datasets import load_dataset
+    import datasets as _datasets_pkg
+    print(f"[BOOT] datasets version: {_datasets_pkg.__version__}", flush=True)
+    try:
+        import fsspec as _fsspec
+        print(f"[BOOT] fsspec version: {_fsspec.__version__}", flush=True)
+    except Exception:
+        pass
+    try:
+        import pyarrow as _pa
+        print(f"[BOOT] pyarrow version: {_pa.__version__}", flush=True)
+    except Exception:
+        pass
+except Exception:
+    print("[FATAL] Gagal import `datasets`:", flush=True)
+    traceback.print_exc()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(1)
+
+# ---- Konfigurasi ----
 LANGUAGES = {
     "id": "Indonesian",
     "en": "English",
@@ -29,7 +58,7 @@ LANGUAGES = {
 
 TOKENS_PER_LANG = 30_000_000
 DATASET_NAME    = "uonlp/CulturaX"
-OUTPUT_DIR      = Path("output")
+OUTPUT_DIR      = Path("output").resolve()   # absolut, biar tidak ambigu
 
 
 def count_tokens(text: str) -> int:
@@ -51,6 +80,7 @@ def stream_language_to_file(lang_code: str, target_tokens: int, out_path: Path) 
             split="train",
             streaming=True,
         )
+        print(f"[INFO] {lang_code}: dataset stream terbuka", flush=True)
 
         with open(out_path, "w", encoding="utf-8") as f:
             for example in ds:
@@ -70,12 +100,10 @@ def stream_language_to_file(lang_code: str, target_tokens: int, out_path: Path) 
                           flush=True)
                     break
 
-            # Paksa data sampai ke disk sebelum file ditutup
             f.flush()
             os.fsync(f.fileno())
 
     finally:
-        # Lepas iterator & koneksi HTTP sebelum interpreter shutdown
         try:
             if ds is not None:
                 del ds
@@ -96,7 +124,13 @@ def write_summary(summary: dict) -> None:
 
 
 def main(langs: list[str]) -> None:
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    print(f"[INFO] CWD        : {Path.cwd()}", flush=True)
+    print(f"[INFO] OUTPUT_DIR : {OUTPUT_DIR}", flush=True)
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if not OUTPUT_DIR.is_dir():
+        raise RuntimeError(f"Gagal membuat direktori: {OUTPUT_DIR}")
+    print(f"[INFO] Direktori output siap: {OUTPUT_DIR}", flush=True)
 
     summary = {}
     summary_path = OUTPUT_DIR / "summary.json"
@@ -112,7 +146,18 @@ def main(langs: list[str]) -> None:
             continue
 
         out_path = OUTPUT_DIR / f"{lang_code}.jsonl"
-        tok = stream_language_to_file(lang_code, TOKENS_PER_LANG, out_path)
+        print(f"[INFO] === mulai bahasa {lang_code} ({LANGUAGES[lang_code]}) ===",
+              flush=True)
+
+        try:
+            tok = stream_language_to_file(lang_code, TOKENS_PER_LANG, out_path)
+        except Exception:
+            print(f"[ERROR] bahasa {lang_code} gagal:", flush=True)
+            traceback.print_exc()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            continue
+
         summary[lang_code] = {
             "language": LANGUAGES[lang_code],
             "tokens": tok,
@@ -139,16 +184,14 @@ def parse_args() -> list[str]:
 
 
 if __name__ == "__main__":
+    exit_code = 0
     try:
         main(parse_args())
     except Exception:
         traceback.print_exc()
-        sys.stdout.flush()
-        sys.stderr.flush()
-        # Skip Python shutdown -> hindari PyGILState_Release crash
-        os._exit(1)
+        exit_code = 1
 
     sys.stdout.flush()
     sys.stderr.flush()
-    # KELUAR PAKSA: lewati shutdown cleanup (tempat crash PyGILState_Release terjadi)
-    os._exit(0)
+    # Keluar paksa -> bypass shutdown cleanup (penyebab PyGILState_Release crash)
+    os._exit(exit_code)
