@@ -1,14 +1,11 @@
-name: Upload to Release (Manual, Recursive Unzip)
+name: Upload to Release
 
 on:
+  # Hanya manual — TIDAK jalan otomatis saat push/commit
   workflow_dispatch:
     inputs:
       config:
-        description: |
-          Daftar tag=link, satu per baris, maksimal 6.
-          Contoh:
-          dataset-v1=https://example.com/file1.zip
-          dataset-v2=https://example.com/file2.zip
+        description: 'Format: tag1=link1, tag2=link2 (maks 6, pisah dengan koma)'
         required: true
         type: string
 
@@ -16,153 +13,124 @@ permissions:
   contents: write
 
 jobs:
-  setup:
-    name: Validasi konfigurasi
+  upload:
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.parse.outputs.matrix }}
     steps:
-      - name: Parse tag=link
-        id: parse
-        shell: bash
+      - name: Proses & Upload ke Release
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: azrielspace852-wq/dataset
+          CONFIG: ${{ inputs.config }}
         run: |
           set -euo pipefail
 
-          CONFIG="${{ inputs.config }}"
-          CONFIG="${CONFIG//$'\r'/}"
+          IFS=',' read -ra ITEMS <<< "$CONFIG"
 
-          mapfile -t lines <<< "$CONFIG"
-          json="["
-          count=0
-
-          for line in "${lines[@]}"; do
-            # trim spasi awal/akhir
-            line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-
-            # lewati baris kosong / komentar
-            [ -z "$line" ] && continue
-            [[ "$line" == \#* ]] && continue
-
-            if [[ "$line" != *=* ]]; then
-              echo "❌ Baris tidak valid (harus format tag=link): $line" >&2
-              exit 1
-            fi
-
-            tag="${line%%=*}"
-            link="${line#*=}"
-
-            tag="$(printf '%s' "$tag" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-            link="$(printf '%s' "$link" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-
-            if [ -z "$tag" ] || [ -z "$link" ]; then
-              echo "❌ Tag atau link kosong: $line" >&2
-              exit 1
-            fi
-
-            count=$((count + 1))
-            if [ "$count" -gt 6 ]; then
-              echo "❌ Maksimal 6 pasangan tag=link per run." >&2
-              exit 1
-            fi
-
-            tag_json=$(printf '%s' "$tag" | jq -Rs .)
-            link_json=$(printf '%s' "$link" | jq -Rs .)
-
-            if [ "$count" -gt 1 ]; then
-              json+=","
-            fi
-            json+="{\"tag\":$tag_json,\"link\":$link_json}"
-          done
-
-          json+="]"
-
-          if [ "$count" -eq 0 ]; then
-            echo "❌ Tidak ada entri valid." >&2
+          if [ ${#ITEMS[@]} -gt 6 ]; then
+            echo "::error::Maksimal 6 pasangan per run (ditemukan ${#ITEMS[@]})"
             exit 1
           fi
 
-          echo "✅ Ditemukan $count entri."
-          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          # Fungsi rekursif: cari zip terdalam (yang tidak punya zip di dalamnya)
+          process_zip() {
+            local file="$1"
+            local work="$2"
+            mkdir -p "$work/extracted"
 
-  upload:
-    name: Proses ${{ matrix.tag }}
-    needs: setup
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.setup.outputs.matrix) }}
+            if ! unzip -o -q "$file" -d "$work/extracted" 2>/dev/null; then
+              echo "::warning::Gagal extract $file — pakai file ini apa adanya"
+              echo "$file"
+              return
+            fi
 
-    steps:
-      - name: Download dari link
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p work
-          echo "⬇️ Download: ${{ matrix.link }}"
-          curl -fL --retry 3 --retry-delay 5 -o work/original.zip "${{ matrix.link }}"
+            local inner=()
+            while IFS= read -r -d '' z; do
+              inner+=("$z")
+            done < <(find "$work/extracted" -type f -iname "*.zip" -print0)
 
-      - name: Ekstrak semua zip bersarang (rekursif)
-        shell: bash
-        working-directory: work
-        run: |
-          set -euo pipefail
-
-          extract_all() {
-            while true; do
-              local found=0
-              while IFS= read -r -d '' zipfile; do
-                found=1
-                echo "📦 Ekstrak: $zipfile"
-                if ! unzip -o -q "$zipfile" -d .; then
-                  echo "❌ Gagal mengekstrak: $zipfile" >&2
-                  return 1
-                fi
-                rm -f "$zipfile"
-              done < <(find . -type f -name '*.zip' -print0)
-
-              [ "$found" -eq 0 ] && break
-            done
+            if [ ${#inner[@]} -eq 0 ]; then
+              # Tidak ada zip lagi → ini zip terdalam → upload ini
+              echo "$file"
+            else
+              # Masih ada zip → gali lebih dalam
+              local c=0
+              for iz in "${inner[@]}"; do
+                c=$((c+1))
+                process_zip "$iz" "$work/sub_$c"
+              done
+            fi
           }
 
-          extract_all
+          for item in "${ITEMS[@]}"; do
+            # Trim spasi
+            item="$(echo "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            [ -z "$item" ] && continue
 
-          echo "🔍 Sisa file .zip:"
-          if find . -type f -name '*.zip' | grep -q .; then
-            echo "❌ Masih ada file .zip setelah ekstraksi rekursif." >&2
-            find . -type f -name '*.zip' >&2
-            exit 1
-          else
-            echo "✅ Tidak ada file .zip tersisa."
-          fi
+            tag="$(echo "$item"  | cut -d'=' -f1  | xargs)"
+            link="$(echo "$item" | cut -d'=' -f2- | xargs)"
 
-          if [ -z "$(find . -type f -print -quit)" ]; then
-            echo "❌ Tidak ada file setelah ekstraksi." >&2
-            exit 1
-          fi
+            if [ -z "$tag" ] || [ -z "$link" ]; then
+              echo "::error::Format salah: '$item' (harus tag=link)"
+              exit 1
+            fi
 
-      - name: Buat zip final (tanpa zip di dalamnya)
-        id: create_zip
-        shell: bash
-        working-directory: work
-        run: |
-          set -euo pipefail
+            echo "::group::$tag <- $link"
 
-          # Sanitasi nama tag agar aman dijadikan nama file
-          SAFE_TAG="$(printf '%s' "${{ matrix.tag }}" | tr '/\\:*?"<>|' '_________')"
-          if [ -z "$SAFE_TAG" ]; then
-            SAFE_TAG="asset"
-          fi
+            work="$(mktemp -d)"
+            dl="$work/download"
 
-          echo "📦 Membuat ${SAFE_TAG}.zip"
-          zip -r "../${SAFE_TAG}.zip" . -x '*.zip'
-          echo "zip_path=${SAFE_TAG}.zip" >> "$GITHUB_OUTPUT"
+            echo "⬇️ Download..."
+            if ! ( wget -q --timeout=180 -O "$dl" "$link" \
+                   || curl -fsSL --max-time 300 -o "$dl" "$link" ); then
+              echo "::error::Download gagal: $link"
+              exit 1
+            fi
 
-      - name: Upload ke GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ matrix.tag }}
-          files: ${{ steps.create_zip.outputs.zip_path }}
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            to_upload=()
+            if unzip -l "$dl" >/dev/null 2>&1; then
+              # File adalah zip → telusuri sampai ketemu zip terdalam
+              mv "$dl" "$work/input.zip"
+              mapfile -t inner_files < <(process_zip "$work/input.zip" "$work/ex")
+              for f in "${inner_files[@]}"; do
+                [ -n "$f" ] && [ -f "$f" ] && to_upload+=("$f")
+              done
+            else
+              echo "::notice::File bukan zip → upload apa adanya"
+              to_upload=("$dl")
+            fi
+
+            if [ ${#to_upload[@]} -eq 0 ]; then
+              echo "::error::Tidak ada file yang bisa diupload untuk tag '$tag'"
+              exit 1
+            fi
+
+            # Buat release kalau belum ada
+            if ! gh release view "$tag" -R "$REPO" >/dev/null 2>&1; then
+              echo "📦 Release '$tag' belum ada — dibuat."
+              gh release create "$tag" -R "$REPO" --title "$tag" --notes "Release $tag"
+            fi
+
+            # Upload tiap file (biasanya 1, tapi kalau ada multiple zip terdalam tetap aman)
+            idx=0
+            total=${#to_upload[@]}
+            for f in "${to_upload[@]}"; do
+              idx=$((idx+1))
+              base="$(basename "$f")"
+              ext="${base##*.}"
+
+              if [ "$total" -eq 1 ]; then
+                dest="$work/${tag}.${ext}"
+              else
+                dest="$work/${tag}_${idx}.${ext}"
+              fi
+
+              cp "$f" "$dest"
+              gh release upload "$tag" "$dest" -R "$REPO" --clobber
+              echo "✅ $(basename "$dest") → $tag"
+            done
+
+            rm -rf "$work"
+            echo "::endgroup::"
+          done
+
+          echo "🎉 Semua selesai."
