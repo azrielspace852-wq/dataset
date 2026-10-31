@@ -8,12 +8,15 @@ import json
 from pathlib import Path
 from datasets import load_dataset
 
+# CulturaX uses ISO 639-1 (2-letter) language codes.
+# key  = CulturaX config / output filename
+# value = human-readable name
 LANGUAGES = {
-    "ind": "Indonesian",
-    "eng": "English",
-    "zho": "Chinese",
-    "fra": "French",
-    "kor": "Korean",
+    "id": "Indonesian",
+    "en": "English",
+    "zh": "Chinese",
+    "fr": "French",
+    "ko": "Korean",
 }
 
 TOKENS_PER_LANG = 30_000_000          # 30M × 5 = 150M
@@ -27,7 +30,7 @@ def count_tokens(text: str) -> int:
 
 
 def stream_language_to_file(lang_code: str, target_tokens: int, out_path: Path) -> int:
-    """Stream dataset CulturaX untuk 1 bahasa, tulis JSONL langsung ke disk."""
+    """Stream CulturaX for one language, write JSONL incrementally to disk."""
     print(f"[INFO] Streaming {lang_code} -> {out_path} (target {target_tokens:,} tokens)", flush=True)
 
     ds = load_dataset(
@@ -35,7 +38,7 @@ def stream_language_to_file(lang_code: str, target_tokens: int, out_path: Path) 
         lang_code,
         split="train",
         streaming=True,
-        trust_remote_code=True,
+        # NOTE: no trust_remote_code — dataset is standard Parquet now.
     )
 
     total_tokens = 0
