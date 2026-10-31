@@ -14,9 +14,25 @@ You can visit at huggingface: https://huggingface.co/datasets/uonlp/CulturaX
 **The number of datasets retrieved:** ***150m Tokens***
 
 ## Folder Structure
-.github/workflows/
-script/
+
+.github/workflows/generate-dataset.yml
+script/generate_dataset.py
 
 ## Total tokens
 
 ***150m Tokens***
+
+## Format & Language
+ - format
+  - jsonl: {"text":"..."}
+ - language
+  - Indonesia
+  - English
+  - Mandarin
+  - French
+  - Korean
+**details:** 30m Tokens/language
+
+## Supports & Contacts
+ - Give star in this repository for supports
+Contacts: @azrielspace852-wq or azrielspace852@gmail.com
