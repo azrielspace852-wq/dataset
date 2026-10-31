@@ -15,8 +15,13 @@ You can visit at huggingface: https://huggingface.co/datasets/uonlp/CulturaX
 
 ## Folder Structure
 
-.github/workflows/generate-dataset.yml
-script/generate_dataset.py
+```text
+.
+├── .github/
+│   └── workflows/
+│       └── generate-dataset.yml
+└── generate_dataset.py
+```
 
 ## Total tokens
 
