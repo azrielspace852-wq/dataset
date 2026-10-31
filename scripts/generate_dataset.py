@@ -4,13 +4,11 @@ Generate a multilingual pretraining dataset (JSONL) from CulturaX.
 Target: ~150M tokens across 5 languages.
 """
 
+import gc
 import json
 from pathlib import Path
 from datasets import load_dataset
 
-# CulturaX uses ISO 639-1 (2-letter) language codes.
-# key  = CulturaX config / output filename
-# value = human-readable name
 LANGUAGES = {
     "id": "Indonesian",
     "en": "English",
@@ -19,7 +17,7 @@ LANGUAGES = {
     "ko": "Korean",
 }
 
-TOKENS_PER_LANG = 30_000_000          # 30M × 5 = 150M
+TOKENS_PER_LANG = 30_000_000
 DATASET_NAME    = "uonlp/CulturaX"
 OUTPUT_DIR      = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -30,36 +28,41 @@ def count_tokens(text: str) -> int:
 
 
 def stream_language_to_file(lang_code: str, target_tokens: int, out_path: Path) -> int:
-    """Stream CulturaX for one language, write JSONL incrementally to disk."""
     print(f"[INFO] Streaming {lang_code} -> {out_path} (target {target_tokens:,} tokens)", flush=True)
 
-    ds = load_dataset(
-        DATASET_NAME,
-        lang_code,
-        split="train",
-        streaming=True,
-        # NOTE: no trust_remote_code — dataset is standard Parquet now.
-    )
-
+    ds = None
     total_tokens = 0
     next_report  = 1_000_000
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        for example in ds:
-            text = example.get("text", "")
-            if not text or not text.strip():
-                continue
+    try:
+        ds = load_dataset(
+            DATASET_NAME,
+            lang_code,
+            split="train",
+            streaming=True,
+        )
 
-            f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
-            total_tokens += count_tokens(text)
+        with open(out_path, "w", encoding="utf-8") as f:
+            for example in ds:
+                text = example.get("text", "")
+                if not text or not text.strip():
+                    continue
 
-            if total_tokens >= next_report:
-                print(f"[INFO] {lang_code}: {total_tokens:,} tokens", flush=True)
-                next_report += 1_000_000
+                f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+                total_tokens += count_tokens(text)
 
-            if total_tokens >= target_tokens:
-                print(f"[INFO] {lang_code}: reached ~{total_tokens:,} tokens", flush=True)
-                break
+                if total_tokens >= next_report:
+                    print(f"[INFO] {lang_code}: {total_tokens:,} tokens", flush=True)
+                    next_report += 1_000_000
+
+                if total_tokens >= target_tokens:
+                    print(f"[INFO] {lang_code}: reached ~{total_tokens:,} tokens", flush=True)
+                    break
+    finally:
+        # Paksa tutup iterator & lepas file descriptor sebelum shutdown
+        if ds is not None:
+            del ds
+        gc.collect()
 
     return total_tokens
 
